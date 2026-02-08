@@ -392,6 +392,10 @@ pub enum ImportCommands {
 
         /// Path to the mailbox to import, or '-' for stdin (stdin only supported for mbox)
         path: String,
+
+        /// Path to track already imported emails
+        #[clap(short, long)]
+        progress_tracking_path: Option<String>,
     },
     /// Import a JMAP account
     Account {

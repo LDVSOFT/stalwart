@@ -6,7 +6,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    io::{self, Cursor},
+    io::{self, Cursor, ErrorKind},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -28,7 +28,10 @@ use mail_parser::mailbox::{
 };
 use rand::Rng;
 use serde::de::DeserializeOwned;
-use tokio::{fs::File, io::AsyncReadExt};
+use tokio::{
+    fs::File,
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+};
 
 use crate::modules::{RETRY_ATTEMPTS, UnwrapResult, name_to_id};
 
@@ -71,6 +74,7 @@ impl ImportCommands {
                 format,
                 account,
                 path,
+                progress_tracking_path,
             } => {
                 client.set_default_account_id(name_to_id(&client, &account).await);
                 let mut create_mailboxes = Vec::new();
@@ -257,6 +261,27 @@ impl ImportCommands {
                 // Import messages
                 eprintln!("{} Importing messages...", style("[4/4]").bold().dim(),);
 
+                let already_imported = match progress_tracking_path {
+                    None => HashSet::new(),
+                    Some(ref p) => match File::open(p).await {
+                        Ok(f) => {
+                            let buf = BufReader::new(f);
+                            let mut lines = buf.lines();
+                            let mut res = HashSet::new();
+                            while let Some(line) = lines
+                                .next_line()
+                                .await
+                                .expect("Failed to read progress tracking file")
+                            {
+                                res.insert(line);
+                            }
+                            res
+                        }
+                        Err(e) if e.kind() == ErrorKind::NotFound => HashSet::new(),
+                        Err(e) => panic!("Failed to read progress tracking file: {:?}", &e),
+                    },
+                };
+
                 let client = Arc::new(client);
                 let total_imported = Arc::new(AtomicUsize::from(0));
                 let m = MultiProgress::new();
@@ -276,6 +301,19 @@ impl ImportCommands {
                         .collect::<Vec<_>>(),
                     0usize,
                 )));
+                let successes_file = match progress_tracking_path {
+                    Some(p) => {
+                        let f = File::options()
+                            .create(true)
+                            .append(true)
+                            .open(p)
+                            .await
+                            .expect("Failed to open progress tracking file for writing");
+                        let f = Arc::new(Mutex::new(f));
+                        Some(f)
+                    }
+                    None => None,
+                };
                 let failures = Arc::new(Mutex::new(Vec::new()));
                 let mut message_num = 0;
 
@@ -299,6 +337,10 @@ impl ImportCommands {
                     for result in mailbox.by_ref() {
                         match result {
                             Ok(message) => {
+                                if already_imported.contains(&message.identifier) {
+                                    continue;
+                                }
+
                                 message_num += 1;
                                 let client = client.clone();
                                 let mailbox_id = mailbox_id.clone();
@@ -306,6 +348,7 @@ impl ImportCommands {
                                 let total_imported = total_imported.clone();
                                 let pbs = pbs.clone();
                                 let failures = failures.clone();
+                                let successes_file = successes_file.clone();
 
                                 futures.push(async move {
                                     // Update progress bar
@@ -364,6 +407,15 @@ impl ImportCommands {
                                         {
                                             Ok(_) => {
                                                 total_imported.fetch_add(1, Ordering::Relaxed);
+                                                if let Some(f) = successes_file {
+                                                    let mut f = f.lock().unwrap();
+                                                    let success_line = format!("{}\n", message.identifier);
+                                                    match f.write(success_line.as_bytes()).await {
+                                                        Ok(n) if n != success_line.len() => panic!("Tear write of progress tracking record"),
+                                                        Err(e) => panic!("Failed to write progress tracking record: {:?}", &e),
+                                                        Ok(_) => {}
+                                                    }
+                                                }
                                             }
                                             Err(_) if retry_count < RETRY_ATTEMPTS => {
                                                 let backoff = rand::rng().random_range(50..=300);
@@ -407,6 +459,15 @@ impl ImportCommands {
                 for pb in pbs.lock().unwrap().0.iter() {
                     pb.finish_with_message("Done");
                 }
+
+                if let Some(successes_file) = successes_file {
+                    let successes_file = successes_file.lock().unwrap();
+                    successes_file
+                        .sync_data()
+                        .await
+                        .expect("Failed to sync progress tracking file");
+                }
+
                 let failures = failures.lock().unwrap();
                 eprintln!(
                     "\n\nSuccessfully imported {} messages.\n",
