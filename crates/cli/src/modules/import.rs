@@ -104,6 +104,9 @@ impl ImportCommands {
                                     if folder_name.is_empty() {
                                         folder_name = ".";
                                     }
+                                    if folder_name == "INBOX" {
+                                        folder_name = "Inbox";
+                                    }
                                     folder_parts.push(folder_name.to_string());
                                     if !create_mailbox_names.contains(&folder_parts) {
                                         create_mailboxes.push(Mailbox::None);
