@@ -9,7 +9,7 @@ use std::{
     io::{self, Cursor, ErrorKind},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -31,6 +31,7 @@ use serde::de::DeserializeOwned;
 use tokio::{
     fs::File,
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    sync::Mutex,
 };
 
 use crate::modules::{RETRY_ATTEMPTS, UnwrapResult, name_to_id};
@@ -353,7 +354,7 @@ impl ImportCommands {
                                 futures.push(async move {
                                     // Update progress bar
                                     {
-                                        let mut pbs = pbs.lock().unwrap();
+                                        let mut pbs = pbs.lock().await;
                                         let pb = &pbs.0[pbs.1 % pbs.0.len()];
                                         pb.set_message(format!(
                                             "Importing {}: {}/{}",
@@ -408,7 +409,7 @@ impl ImportCommands {
                                             Ok(_) => {
                                                 total_imported.fetch_add(1, Ordering::Relaxed);
                                                 if let Some(f) = successes_file {
-                                                    let mut f = f.lock().unwrap();
+                                                    let mut f = f.lock().await;
                                                     let success_line = format!("{}\n", message.identifier);
                                                     match f.write(success_line.as_bytes()).await {
                                                         Ok(n) if n != success_line.len() => panic!("Tear write of progress tracking record"),
@@ -425,7 +426,7 @@ impl ImportCommands {
                                                 continue;
                                             }
                                             Err(err) => {
-                                                failures.lock().unwrap().push(format!(
+                                                failures.lock().await.push(format!(
                                                     concat!(
                                                         "Failed to import message {} ",
                                                         "with identifier '{}': {}"
@@ -445,7 +446,7 @@ impl ImportCommands {
                             Err(e) => {
                                 failures
                                     .lock()
-                                    .unwrap()
+                                    .await
                                     .push(format!("I/O error reading message: {}", e));
                             }
                         }
@@ -456,19 +457,19 @@ impl ImportCommands {
                 }
 
                 // Done
-                for pb in pbs.lock().unwrap().0.iter() {
+                for pb in pbs.lock().await.0.iter() {
                     pb.finish_with_message("Done");
                 }
 
                 if let Some(successes_file) = successes_file {
-                    let successes_file = successes_file.lock().unwrap();
+                    let successes_file = successes_file.lock().await;
                     successes_file
                         .sync_data()
                         .await
                         .expect("Failed to sync progress tracking file");
                 }
 
-                let failures = failures.lock().unwrap();
+                let failures = failures.lock().await;
                 eprintln!(
                     "\n\nSuccessfully imported {} messages.\n",
                     total_imported.load(Ordering::Relaxed)
